@@ -1,6 +1,6 @@
-provider "aws" {
-  region = local.region
-}
+################################################################################
+# Data Sources
+################################################################################
 
 data "aws_availability_zones" "available" {
   # Exclude local zones
@@ -10,19 +10,20 @@ data "aws_availability_zones" "available" {
   }
 }
 
-locals {
-  name               = "ex-${basename(path.cwd)}"
-  kubernetes_version = "1.33"
-  region             = "us-west-2"
+data "aws_caller_identity" "current" {}
 
-  vpc_cidr = "10.0.0.0/16"
-  azs      = slice(data.aws_availability_zones.available.names, 0, 3)
+################################################################################
+# VPC Module
+################################################################################
 
-  tags = {
-    Test       = local.name
-    GithubRepo = "terraform-aws-eks"
-    GithubOrg  = "terraform-aws-modules"
-  }
+module "vpc" {
+  source = "./modules/vpc"
+
+  vpc_name = local.name
+  vpc_cidr = local.vpc_cidr
+  azs      = local.azs
+
+  tags = local.tags
 }
 
 ################################################################################
@@ -30,78 +31,34 @@ locals {
 ################################################################################
 
 module "eks" {
-  source = "../.."
+  source = "./modules/eks"
 
-  name                   = local.name
-  kubernetes_version     = local.kubernetes_version
-  endpoint_public_access = true
+  cluster_name       = local.name
+  kubernetes_version = local.kubernetes_version
+  private_subnets   = module.vpc.private_subnets
+  public_subnets    = module.vpc.public_subnets
 
-  enable_cluster_creator_admin_permissions = true
-
-  compute_config = {
-    enabled    = true
-    node_pools = ["general-purpose"]
-  }
-
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  instance_types = ["t3.small"]
+  capacity_type  = "SPOT"
+  desired_size   = 1
+  max_size       = 2
+  min_size       = 1
 
   tags = local.tags
-}
 
-module "eks_auto_custom_node_pools" {
-  source = "../.."
-
-  name                   = "${local.name}-custom"
-  kubernetes_version     = local.kubernetes_version
-  endpoint_public_access = true
-
-  enable_cluster_creator_admin_permissions = true
-
-  # Create just the IAM resources for EKS Auto Mode for use with custom node pools
-  create_auto_mode_iam_resources = true
-  compute_config = {
-    enabled = true
-  }
-
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
-
-  tags = local.tags
-}
-
-module "disabled_eks" {
-  source = "../.."
-
-  create = false
+  depends_on = [module.vpc]
 }
 
 ################################################################################
-# Supporting Resources
+# S3 Module
 ################################################################################
 
-module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 6.0"
+module "s3" {
+  source = "./modules/s3"
 
-  name = local.name
-  cidr = local.vpc_cidr
-
-  azs             = local.azs
-  private_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 4, k)]
-  public_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 48)]
-  intra_subnets   = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 52)]
-
-  enable_nat_gateway = true
-  single_nat_gateway = true
-
-  public_subnet_tags = {
-    "kubernetes.io/role/elb" = 1
-  }
-
-  private_subnet_tags = {
-    "kubernetes.io/role/internal-elb" = 1
-  }
+  bucket_name       = "my-terraform-bucket-${data.aws_caller_identity.current.account_id}"
+  enable_versioning = true
+  sse_algorithm     = "AES256"
 
   tags = local.tags
 }
